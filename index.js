@@ -154,10 +154,20 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/users/profile', authenticateToken, async (req, res) => {
-  const { bio } = req.body;
+  const { bio, username } = req.body;
   try {
-    await pool.query('UPDATE users SET bio = $1 WHERE id = $2', [bio || '', req.user.id]);
-    res.json({ success: true, bio });
+    if (username && username.trim()) {
+      const trimmed = username.trim();
+      const existing = await pool.query('SELECT id FROM users WHERE username =  AND id != ', [trimmed, req.user.id]);
+      if (existing.rows.length > 0) {
+        return res.status(409).json({ error: 'Username already taken' });
+      }
+      await pool.query('UPDATE users SET username = , bio =  WHERE id = ', [trimmed, bio || '', req.user.id]);
+    } else {
+      await pool.query('UPDATE users SET bio =  WHERE id = ', [bio || '', req.user.id]);
+    }
+    const result = await pool.query('SELECT id, username, bio, avatar, is_admin, is_premium FROM users WHERE id = ', [req.user.id]);
+    res.json({ success: true, user: result.rows[0] });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
