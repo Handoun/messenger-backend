@@ -588,6 +588,28 @@ io.on('connection', (socket) => {
     } catch (err) { console.error('Failed to save channel message:', err); }
   });
 
+  socket.on('call_initiate', ({ to, isVideo, callerName, callerAvatar }) => {
+    io.to(user:).emit('incoming_call', {
+      from: userId,
+      callerName: callerName || socket.user.username,
+      callerAvatar: callerAvatar || null,
+      isVideo: isVideo !== false,
+    });
+  });
+
+  socket.on('call_response', ({ to, accepted }) => {
+    io.to(user:).emit('call_response', {
+      from: userId,
+      accepted,
+    });
+  });
+
+  socket.on('call_end', ({ to }) => {
+    io.to(user:).emit('call_ended', {
+      from: userId,
+    });
+  });
+
   socket.on('disconnect', () => {
     onlineUsers.delete(userId);
     io.emit('user_status', { userId, online: false });
