@@ -39,6 +39,7 @@ const initDb = async () => {
       )
     `);
 
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS video TEXT;`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,

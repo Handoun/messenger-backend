@@ -153,20 +153,28 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+app.get('/api/users/profile', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, username, bio, avatar, is_admin, is_premium, banned, subscription_until FROM users WHERE id = $1', [req.user.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json(result.rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 app.put('/api/users/profile', authenticateToken, async (req, res) => {
   const { bio, username } = req.body;
   try {
     if (username && username.trim()) {
       const trimmed = username.trim();
-      const existing = await pool.query('SELECT id FROM users WHERE username =  AND id != ', [trimmed, req.user.id]);
+      const existing = await pool.query('SELECT id FROM users WHERE username = $1 AND id != $2', [trimmed, req.user.id]);
       if (existing.rows.length > 0) {
         return res.status(409).json({ error: 'Username already taken' });
       }
-      await pool.query('UPDATE users SET username = , bio =  WHERE id = ', [trimmed, bio || '', req.user.id]);
+      await pool.query('UPDATE users SET username = $1, bio = $2 WHERE id = $3', [trimmed, bio || '', req.user.id]);
     } else {
-      await pool.query('UPDATE users SET bio =  WHERE id = ', [bio || '', req.user.id]);
+      await pool.query('UPDATE users SET bio = $1 WHERE id = $2', [bio || '', req.user.id]);
     }
-    const result = await pool.query('SELECT id, username, bio, avatar, is_admin, is_premium FROM users WHERE id = ', [req.user.id]);
+    const result = await pool.query('SELECT id, username, bio, avatar, is_admin, is_premium FROM users WHERE id = $1', [req.user.id]);
     res.json({ success: true, user: result.rows[0] });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
@@ -185,12 +193,34 @@ app.delete('/api/sessions/:id', authenticateToken, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
+app.delete('/api/messages/:id', authenticateToken, async (req, res) => {
+  const messageId = parseInt(req.params.id);
+  try {
+    const msg = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
+    if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' });
+    const row = msg.rows[0];
+    const userIsAdmin = await isAdmin(req.user.id);
+    if (row.sender_id !== req.user.id && !userIsAdmin) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
+    if (row.receiver_id) {
+      io.to(`user:${row.receiver_id}`).emit('message_deleted', { messageId });
+      io.to(`user:${row.sender_id}`).emit('message_deleted', { messageId });
+    } else if (row.group_id) {
+      const members = await pool.query('SELECT user_id FROM group_members WHERE group_id = $1', [row.group_id]);
+      members.rows.forEach(m => io.to(`user:${m.user_id}`).emit('message_deleted', { messageId, groupId: row.group_id }));
+    }
+    res.json({ success: true, messageId });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 app.get('/api/messages/:userId', authenticateToken, async (req, res) => {
   const currentUserId = req.user.id;
   const otherUserId = parseInt(req.params.userId);
   try {
     const result = await pool.query(
-      `SELECT id, sender_id, receiver_id, text, image, audio, status, created_at 
+      `SELECT id, sender_id, receiver_id, text, image, audio, video, status, created_at 
        FROM messages 
        WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)
        ORDER BY created_at DESC
@@ -536,33 +566,51 @@ io.on('connection', (socket) => {
   io.emit('user_status', { userId, online: true });
   socket.join(`user:${userId}`);
 
-  socket.on('private_message', async ({ to, text, image, audio }) => {
+  socket.on('private_message', async ({ to, text, image, audio, video }) => {
     const senderId = userId;
     try {
       const result = await pool.query(
-        'INSERT INTO messages (sender_id, receiver_id, text, image, audio, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at',
-        [senderId, to, text || '', image || null, audio || null, 'sent']
+        'INSERT INTO messages (sender_id, receiver_id, text, image, audio, video, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at',
+        [senderId, to, text || '', image || null, audio || null, video || null, 'sent']
       );
       const row = result.rows[0];
-      const message = { id: row.id, sender_id: senderId, receiver_id: to, text: text || '', image: image || null, audio: audio || null, status: 'sent', created_at: row.created_at };
+      const message = { id: row.id, sender_id: senderId, receiver_id: to, text: text || '', image: image || null, audio: audio || null, video: video || null, status: 'sent', created_at: row.created_at };
       io.to(`user:${to}`).emit('private_message', message);
       socket.emit('private_message', message);
     } catch (err) { console.error('Failed to save message:', err); }
   });
 
-  socket.on('group_message', async ({ groupId, text, image, audio }) => {
+  socket.on('group_message', async ({ groupId, text, image, audio, video }) => {
     const senderId = userId;
     try {
       const result = await pool.query(
-        'INSERT INTO messages (sender_id, group_id, text, image, audio, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at',
-        [senderId, groupId, text || '', image || null, audio || null, 'sent']
+        'INSERT INTO messages (sender_id, group_id, text, image, audio, video, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at',
+        [senderId, groupId, text || '', image || null, audio || null, video || null, 'sent']
       );
       const row = result.rows[0];
-      const message = { id: row.id, sender_id: senderId, group_id: groupId, text: text || '', image: image || null, audio: audio || null, status: 'sent', created_at: row.created_at };
+      const message = { id: row.id, sender_id: senderId, group_id: groupId, text: text || '', image: image || null, audio: audio || null, video: video || null, status: 'sent', created_at: row.created_at };
       const members = await pool.query('SELECT user_id FROM group_members WHERE group_id = $1', [groupId]);
       members.rows.forEach(m => { if (m.user_id !== senderId) io.to(`user:${m.user_id}`).emit('group_message', message); });
       socket.emit('group_message', message);
     } catch (err) { console.error('Failed to save group message:', err); }
+  });
+
+  socket.on('delete_message', async ({ messageId }) => {
+    try {
+      const msg = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
+      if (msg.rows.length === 0) return;
+      const row = msg.rows[0];
+      const userIsAdmin = await isAdmin(userId);
+      if (row.sender_id !== userId && !userIsAdmin) return;
+      await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
+      if (row.receiver_id) {
+        io.to(`user:${row.receiver_id}`).emit('message_deleted', { messageId });
+        io.to(`user:${row.sender_id}`).emit('message_deleted', { messageId });
+      } else if (row.group_id) {
+        const members = await pool.query('SELECT user_id FROM group_members WHERE group_id = $1', [row.group_id]);
+        members.rows.forEach(m => io.to(`user:${m.user_id}`).emit('message_deleted', { messageId, groupId: row.group_id }));
+      }
+    } catch (e) { console.error('Socket delete_message error:', e); }
   });
 
   socket.on('channel_message', async ({ channelId, text, image, audio }) => {
@@ -588,24 +636,33 @@ io.on('connection', (socket) => {
     } catch (err) { console.error('Failed to save channel message:', err); }
   });
 
-  socket.on('call_initiate', ({ to, isVideo, callerName, callerAvatar }) => {
-    io.to(user:).emit('incoming_call', {
+  // Native WebRTC Signaling
+  socket.on('webrtc_signal', ({ to, signal }) => {
+    io.to('user:' + to).emit('webrtc_signal', {
       from: userId,
-      callerName: callerName || socket.user.username,
+      signal,
+    });
+  });
+
+  socket.on('call_initiate', ({ to, isVideo, callerName, callerAvatar, offer }) => {
+    io.to('user:' + to).emit('incoming_call', {
+      from: userId,
+      callerName: callerName || socket.user?.username || 'Пользователь',
       callerAvatar: callerAvatar || null,
       isVideo: isVideo !== false,
+      offer: offer || null,
     });
   });
 
   socket.on('call_response', ({ to, accepted }) => {
-    io.to(user:).emit('call_response', {
+    io.to('user:' + to).emit('call_response', {
       from: userId,
       accepted,
     });
   });
 
   socket.on('call_end', ({ to }) => {
-    io.to(user:).emit('call_ended', {
+    io.to('user:' + to).emit('call_ended', {
       from: userId,
     });
   });
